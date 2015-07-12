@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 import sys
-import DriveSync
+import DriveBackup
 
 if len( sys.argv ) < 2:
     print 'Supply some text to write as an argument'
@@ -8,7 +8,7 @@ if len( sys.argv ) < 2:
 
 try:
     text = sys.argv[ 1 ]
-    ser = DriveSync.DriveBackupManager( 'example.json~' )
+    ser = DriveBackup.DriveBackupManager( 'example.json~' )
 
     def printStoreData( ser ):
         print "Current data: '%s' @ version %d" % ( ser.localData(), ser.dataStore.version )
@@ -19,5 +19,5 @@ try:
     printStoreData( ser )
 
     ser.pushToDrive()
-except DriveSync.StoreException as e:
+except DriveBackupe.StoreException as e:
     print str( e )
