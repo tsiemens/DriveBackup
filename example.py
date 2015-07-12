@@ -6,13 +6,18 @@ if len( sys.argv ) < 2:
     print 'Supply some text to write as an argument'
     quit()
 
-text = sys.argv[ 1 ]
-ser = DriveSync.DriveSynchronizer( 'example.json~' )
+try:
+    text = sys.argv[ 1 ]
+    ser = DriveSync.DriveBackupManager( 'example.json~' )
 
-def printStoreData( ser ):
-    print "Current data: '%s' @ version %d" % ( ser.localData(), ser.dataStore.version )
+    def printStoreData( ser ):
+        print "Current data: '%s' @ version %d" % ( ser.localData(), ser.dataStore.version )
 
-printStoreData( ser )
-print "Writing '%s'" % text
-ser.writeLocalData( text )
-printStoreData( ser )
+    printStoreData( ser )
+    print "Writing '%s'" % text
+    ser.writeLocalData( text )
+    printStoreData( ser )
+
+    ser.pushToDrive()
+except DriveSync.StoreException as e:
+    print str( e )

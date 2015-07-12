@@ -1,5 +1,8 @@
 import os
 import json
+import tempfile
+import subprocess
+from subprocess import PIPE
 
 class DictJsonEncoder( json.JSONEncoder ):
     def default( self, obj ):
@@ -15,13 +18,11 @@ def newConfigFromDict( dct ):
         setattr( conf, k, v )
     return conf
 
-class Metadata( object ):
-    def __init__( self ):
-        self.lastKnownDriveVersion = 0
-
-def newMetadataFromDict( dct ):
-    md = Metadata()
-    md.lastKnownDriveVersion = dct[ 'lastKnownDriveVersion' ]
+class StoreException( Exception ):
+    def __init__( self, msg ):
+        self.msg = msg
+    def __str__( self ):
+        return self.msg
 
 class DataStore( object ):
     def __init__( self, version=0, data='' ):
@@ -31,24 +32,34 @@ class DataStore( object ):
 def newDataStoreFromDict( dct ):
     return DataStore( version=dct[ 'version' ], data=dct[ 'data' ] )
 
-class DriveSynchronizer( object ):
+class DriveBackupManager( object ):
 
-    def __init__( self, localFile, driveFile=None, metadataFile=None, configFile=None ):
+    def __init__( self, localFile, driveFile=None, configFile=None ):
         ''' A copy of the drive file is stored in locaFile.
         If driveFile and configFile are not provided, driveFile will default to be the same name as
-        localFile, at the root directory of Drive, minus any prefixed .'s.
-        metadataFile defaults to localFile.metadata if not provided.'''
+        localFile, at the root directory of Drive, minus any prefixed .'s'''
         self.localFile = localFile
-        self.metadataFile = metadataFile if metadataFile is not None else \
-                os.path.splitext( localFile )[ 0 ] + '.metadata'
         self.configFile = configFile
 
         defaultDriveFile = driveFile if driveFile is not None else os.path.split( localFile )[ 1 ]
         self.config = self._loadConfig( default=Config( driveFile=defaultDriveFile ) )
 
-        self.metadata = self._loadMetadata()
-
         self.dataStore = self._loadDataStore()
+        self.tempfiles = {}
+
+    def __del__( self ):
+        for filename, delete in self.tempfiles.iteritems():
+            if delete:
+                os.remove( filename )
+
+    def _openNewTmpFile( self ):
+        tmpf = None
+        try:
+            tmpf = tempfile.NamedTemporaryFile( mode='w+b', delete=False )
+            return tmpf
+        finally:
+            if tmpf:
+                self.tempfiles[ tmpf.name ] = True
 
     def _toJson( self, obj, cls=DictJsonEncoder ):
         return json.dumps( obj, cls=cls )
@@ -58,19 +69,16 @@ class DriveSynchronizer( object ):
         return self._toJson( self.dataStore )
 
     def deserializeDataStore( self, filedata ):
-        return newDataStoreFromDict( json.loads( filedata ) )
-
-    def getSerializedMetadata( self ):
-        return self._toJson( self.metadata )
-
-    def deserializeMetadata( self, filedata ):
-        return newMetadataFromDict( json.loads( filedata ) )
+        try:
+            return newDataStoreFromDict( json.loads( filedata ) )
+        except ValueError:
+            return DataStore()
 
     def deserializeConfig( self, filedata ):
-        return newConfigFromDict( json.loads( filedata ) )
-
-    def mergeFiles( self, localData, driveData ):
-        return driveData
+        try:
+            return newConfigFromDict( json.loads( filedata ) )
+        except ValueError:
+            return Config()
     # --------------------------------------------
 
 
@@ -92,13 +100,6 @@ class DriveSynchronizer( object ):
     def _writeDataStore( self ):
         self._writeSerializedToFile( self.localFile, lambda: self.getSerializedDataStore() )
 
-    def _loadMetadata( self ):
-        return self._loadFileObject( self.metadataFile,
-                lambda d: self.deserializeMetadata( d ), Metadata() )
-
-    def _writeMetadata( self ):
-        self._writeSerializedToFile( self.metadataFile, lambda: self.getSerializedMetadata() )
-
     def _loadConfig( self, default=Config() ):
         return self._loadFileObject( self.configFile,
                 lambda d: self.deserializeConfig( d ), default )
@@ -110,15 +111,55 @@ class DriveSynchronizer( object ):
         cachedData = self._loadDataStore()
         version = cachedData.version
         if cachedData.data != data:
-            version += 1
-            self.dataStore.version = version
             self.dataStore.data = data
             self._writeDataStore()
 
+    def _fetchDataStoreFromDrive( self ):
+        tmpfname = None
+        with self._openNewTmpFile() as tmpf:
+            tmpfname = tmpf.name
+        proc = subprocess.Popen(
+                [ 'skicka', 'download', self.config.driveFile, tmpfname ],
+                stdout=PIPE, stderr=PIPE, stdin=PIPE )
+        out, err = proc.communicate()
+        if err:
+            if 'not found on Drive' in err:
+                return DataStore( version=self.dataStore.version ), None
+        print out, err
+
+        with open( tmpfname, 'r' ) as tmpf:
+            dataStore = self.deserializeDataStore( tmpf.read() )
+            return dataStore, tmpfname
+
+    def _fetchValidRemoveDataStore( self ):
+        driveStore, filename = self._fetchDataStoreFromDrive()
+        if driveStore.version == self.dataStore.version:
+            return driveStore
+        else:
+            beforeAfter = 'before' if driveStore.version < self.dataStore.version else 'later'
+            self.tempfiles[ filename ] = False
+            raise StoreException( 'Drive version (%d) is %s than local version (%d). '
+                                  'Resolve the local file to version of the remote file '
+                                  '( temporarily at %s )' % ( driveStore.version, beforeAfter,
+                                  self.dataStore.version, filename ) )
+
     def pushToDrive( self ):
-        pass
+        driveStore = self._fetchValidRemoveDataStore()
+        if driveStore.data != self.dataStore.data:
+            self.dataStore.version += 1
+            self._writeDataStore()
+
+            print 'Pushing %s verison %d to Drive/%s' \
+                % ( self.localFile, self.dataStore.version, self.config.driveFile )
+            proc = subprocess.Popen(
+                    [ 'skicka', 'upload', self.localFile, self.config.driveFile ],
+                    stdout=PIPE, stderr=PIPE, stdin=PIPE )
+            out, err = proc.communicate()
+            print out, err
+        else:
+            print 'No changes to push'
 
     def pullFromDrive( self ):
-        pass
+        self._fetchValidRemoveDataStore()
 
 
